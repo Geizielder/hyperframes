@@ -3,20 +3,27 @@
  * manifest at the end of `plan()`, compute the planHash from the frozen
  * artifacts, and return the manifest path.
  *
- * Signature-only skeleton: there are no callers yet. The function body
- * lands when `services/distributed/plan.ts` is added and composes the
- * stage primitives.
- *
- * See DISTRIBUTED-RENDERING-PLAN.md §2.1 phase 6, §4.1 directory layout,
- * §4.3 LockedRenderConfig.
+ * Called from `services/distributed/plan.ts` after all earlier phases have
+ * materialized their on-disk artifacts under `<planDir>/`. The function is
+ * deliberately the last step so `planHash` is computed from the actual bytes
+ * the chunk worker will read — not from intermediate values the controller
+ * has in memory.
  */
 
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+
 import type { Fps } from "@hyperframes/core";
-import type { PlanDimensions } from "./planHash.js";
+import {
+  canonicalJsonStringify,
+  computePlanHash,
+  type PlanAssetHash,
+  type PlanDimensions,
+  sha256Hex,
+} from "./planHash.js";
 
 /**
- * The encoder configuration locked in at plan time. Mirrors §4.3
- * LockedRenderConfig in the design doc.
+ * The encoder configuration locked in at plan time.
  */
 export interface LockedRenderConfig {
   // Capture
@@ -30,6 +37,13 @@ export interface LockedRenderConfig {
 
   // Encode
   encoder: "libx264-software" | "libx265-software" | "prores-software" | "png-sequence";
+  /**
+   * Caller-supplied quality enum, persisted so chunk workers can rebuild
+   * the matching `getEncoderPreset(quality, format, …)` instead of
+   * inferring quality from the encoder discriminant (which loses
+   * information when the encoder→quality table grows non-injective).
+   */
+  quality: "draft" | "standard" | "high";
   ffmpegVersion: string;
   preset: string;
   crf?: number;
@@ -61,14 +75,15 @@ export interface CompositionMetadataJson {
 export interface ChunkSliceJson {
   index: number;
   startFrame: number;
-  /** Inclusive end frame for the chunk. */
+  /** Exclusive upper bound — chunk workers iterate frames in `[startFrame, endFrame)`. */
   endFrame: number;
 }
 
 /**
  * Inputs to `freezePlan`. `planDir` already contains `compiled/`,
  * `video-frames/`, and (optionally) `audio.aac` by the time freezePlan
- * runs — see §2.1 phases 1-5.
+ * runs — those are materialized by the upstream compile/probe/extract/audio
+ * stages composed in `services/distributed/plan.ts`.
  */
 export interface FreezePlanInput {
   /** Absolute path to the plan directory being frozen. */
@@ -80,12 +95,18 @@ export interface FreezePlanInput {
   producerVersion: string;
   /** Hash of the deterministic-font snapshot baked into the plan. */
   fontSnapshotSha: string;
+  /** Composition duration in seconds (mirrors `composition.durationSeconds`; carried separately for `plan.json`). */
+  durationSeconds: number;
+  /** Total frame count, separately materialized for callers that read `plan.json` without parsing chunks.json. */
+  totalFrames: number;
+  /** Whether `<planDir>/audio.aac` was produced. */
+  hasAudio: boolean;
 }
 
 export interface FreezePlanResult {
   /** Absolute path to `plan.json`. */
   planJsonPath: string;
-  /** Content-addressed planHash; see §4.2. */
+  /** Content-addressed planHash; see {@link computePlanHash}. */
   planHash: string;
 }
 
@@ -95,17 +116,174 @@ export interface FreezePlanResult {
  * `../runtimeEnvSnapshot.ts` — chunk workers re-apply the snapshot during
  * boot, so it needs to be importable without dragging in the freeze pipeline.
  */
-export { snapshotRuntimeEnv, RUNTIME_ENV_PREFIXES } from "../runtimeEnvSnapshot.js";
+export { RUNTIME_ENV_PREFIXES, snapshotRuntimeEnv } from "../runtimeEnvSnapshot.js";
+
+/** The relative path inside `<planDir>/` to the compiled HTML. */
+const COMPILED_INDEX_RELATIVE_PATH = "compiled/index.html";
+/** Files whose contents are framing of the plan itself, not assets. */
+const HASH_EXCLUDED_PLAN_FILES = new Set<string>([
+  "plan.json",
+  "meta/encoder.json",
+  COMPILED_INDEX_RELATIVE_PATH,
+]);
+
+/**
+ * Recursively drop keys whose value is `undefined`. Preserves arrays and
+ * primitive leaves. Used to sanitize the `LockedRenderConfig` before
+ * canonical-JSON serialization so optional fields collapse to "absent"
+ * rather than tripping `canonicalJsonStringify`'s undefined-rejection.
+ */
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(obj)) {
+      const v = obj[key];
+      if (v === undefined) continue;
+      out[key] = stripUndefined(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Walk `<planDir>/` depth-first; return a sorted, deterministic list of
+ * `{ planRelativePath, absolutePath }` entries. Symlinks are skipped — the
+ * `extractVideosStage` materializes them when `materializeSymlinks: true`,
+ * so anything that slips through is by definition something the caller did
+ * not intend to expose to chunk workers across machines.
+ */
+function listPlanFiles(planDir: string): Array<{ planRelativePath: string; absolutePath: string }> {
+  const results: Array<{ planRelativePath: string; absolutePath: string }> = [];
+  const rootResolved = resolve(planDir);
+
+  function walk(dir: string): void {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        results.push({
+          planRelativePath: relative(rootResolved, full)
+            .split(/[\\/]+/)
+            .join("/"),
+          absolutePath: full,
+        });
+      }
+    }
+  }
+
+  walk(rootResolved);
+  results.sort((a, b) => (a.planRelativePath < b.planRelativePath ? -1 : 1));
+  return results;
+}
+
+/**
+ * Read `compiled/index.html` and SHA every other regular file under `<planDir>/`
+ * except the ones whose contents constitute the plan framing itself. Returns
+ * the compiled HTML bytes (mixed verbatim into `planHash`) and the
+ * sorted-by-path asset hashes.
+ */
+function collectPlanAssetShas(planDir: string): {
+  compositionHtml: Uint8Array;
+  assets: PlanAssetHash[];
+} {
+  const files = listPlanFiles(planDir);
+  let compositionHtml: Uint8Array | null = null;
+  const assets: PlanAssetHash[] = [];
+  for (const file of files) {
+    if (file.planRelativePath === COMPILED_INDEX_RELATIVE_PATH) {
+      compositionHtml = readFileSync(file.absolutePath);
+      continue;
+    }
+    if (HASH_EXCLUDED_PLAN_FILES.has(file.planRelativePath)) continue;
+    const bytes = readFileSync(file.absolutePath);
+    assets.push({ path: file.planRelativePath, sha256: sha256Hex(bytes) });
+  }
+  if (compositionHtml === null) {
+    throw new Error(
+      `[freezePlan] compiled HTML missing at ${COMPILED_INDEX_RELATIVE_PATH} ` +
+        `— upstream compile stage did not materialize the expected file.`,
+    );
+  }
+  return { compositionHtml, assets };
+}
 
 /**
  * Freeze a plan directory: write `meta/*.json` + top-level `plan.json`, then
  * compute `planHash` over the canonicalized contents.
  *
- * Skeleton — body lands when the distributed-render primitives compose the
- * stage functions. The body will resolve `input.encoder.runtimeEnv ||=
- * snapshotRuntimeEnv()` so callers can optionally pre-populate the field,
- * with the live env as the default.
+ * The encoder JSON is written via {@link canonicalJsonStringify} so the bytes
+ * fed into {@link computePlanHash} match the bytes on disk exactly. Consumers
+ * can re-validate a plan by hashing `meta/encoder.json` directly.
  */
-export async function freezePlan(_input: FreezePlanInput): Promise<FreezePlanResult> {
-  throw new Error("freezePlan is not implemented yet.");
+export async function freezePlan(input: FreezePlanInput): Promise<FreezePlanResult> {
+  const {
+    planDir,
+    composition,
+    encoder,
+    chunks,
+    dimensions,
+    producerVersion,
+    fontSnapshotSha,
+    durationSeconds,
+    totalFrames,
+    hasAudio,
+  } = input;
+
+  if (!existsSync(planDir)) {
+    throw new Error(`[freezePlan] planDir does not exist: ${planDir}`);
+  }
+
+  const metaDir = join(planDir, "meta");
+  if (!existsSync(metaDir)) mkdirSync(metaDir, { recursive: true });
+
+  writeFileSync(
+    join(metaDir, "composition.json"),
+    `${JSON.stringify(composition, null, 2)}\n`,
+    "utf-8",
+  );
+
+  // `LockedRenderConfig` has optional fields (`crf`, `bitrate`) that may be
+  // `undefined`. `canonicalJsonStringify` deliberately throws on `undefined`
+  // — JSON has no representation for it, and allowing it would silently
+  // collapse two distinct configs (`{crf: 23}` vs `{crf: 23, bitrate: undefined}`)
+  // into the same hash. Strip undefined values before canonicalizing so the
+  // hashed config matches what is realistically a "missing field".
+  const encoderForCanonical = stripUndefined(encoder) as Record<string, unknown>;
+  const encoderConfigCanonicalJson = canonicalJsonStringify(encoderForCanonical);
+  writeFileSync(join(metaDir, "encoder.json"), encoderConfigCanonicalJson, "utf-8");
+
+  writeFileSync(join(metaDir, "chunks.json"), `${JSON.stringify(chunks, null, 2)}\n`, "utf-8");
+
+  const { compositionHtml, assets } = collectPlanAssetShas(planDir);
+
+  const planHash = computePlanHash({
+    compositionHtml,
+    assets,
+    fontSnapshotSha,
+    encoderConfigCanonicalJson,
+    producerVersion,
+    ffmpegVersion: encoder.ffmpegVersion,
+    dimensions,
+  });
+
+  const planJson = {
+    planHash,
+    producerVersion,
+    ffmpegVersion: encoder.ffmpegVersion,
+    fontSnapshotSha,
+    dimensions,
+    chunkCount: chunks.length,
+    totalFrames,
+    duration: durationSeconds,
+    hasAudio,
+  };
+  const planJsonPath = join(planDir, "plan.json");
+  writeFileSync(planJsonPath, `${JSON.stringify(planJson, null, 2)}\n`, "utf-8");
+
+  return { planJsonPath, planHash };
 }
