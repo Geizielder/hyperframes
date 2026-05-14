@@ -18,9 +18,9 @@
  * and the orchestrator has told us whether the output format demands an
  * alpha channel. The resolved boolean is also returned on the stage's
  * result so downstream stages can consume the value as an explicit
- * parameter instead of reading `cfg.forceScreenshot` directly. See the
- * distributed-render plan §4.3 — `LockedRenderConfig.forceScreenshot`
- * is computed here and frozen for the rest of the pipeline.
+ * parameter instead of reading `cfg.forceScreenshot` directly. The
+ * resolved value also flows into `LockedRenderConfig.forceScreenshot`
+ * for distributed renders, where it must be frozen at plan time.
  *
  * Hard constraints preserved verbatim from the in-process renderer:
  *   - `perfStages.compileOnlyMs` is set to wall-clock ms around the
@@ -70,6 +70,14 @@ export interface CompileStageInput {
   log: ProducerLogger;
   /** Cooperative-cancellation probe; throws `RenderCancelledError` when aborted. */
   assertNotAborted: () => void;
+  /**
+   * When `true`, `compileForRender` threads through to
+   * `injectDeterministicFontFaces` and any external font fetch failure
+   * throws `FontFetchError` instead of silently falling back to system
+   * fonts. Distributed `plan()` passes `true`; the in-process renderer
+   * leaves it `undefined` to preserve current behavior.
+   */
+  failClosedFontFetch?: boolean;
 }
 
 export interface CompileStageResult {
@@ -92,11 +100,23 @@ export interface CompileStageResult {
 }
 
 export async function runCompileStage(input: CompileStageInput): Promise<CompileStageResult> {
-  const { projectDir, workDir, htmlPath, entryFile, job, cfg, needsAlpha, log, assertNotAborted } =
-    input;
+  const {
+    projectDir,
+    workDir,
+    htmlPath,
+    entryFile,
+    job,
+    cfg,
+    needsAlpha,
+    log,
+    assertNotAborted,
+    failClosedFontFetch,
+  } = input;
 
   const compileStart = Date.now();
-  const compiled = await compileForRender(projectDir, htmlPath, join(workDir, "downloads"));
+  const compiled = await compileForRender(projectDir, htmlPath, join(workDir, "downloads"), {
+    failClosedFontFetch: failClosedFontFetch === true,
+  });
   assertNotAborted();
   const compileOnlyMs = Date.now() - compileStart;
   // Fold three signals into a single capture-mode decision: caller's
