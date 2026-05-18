@@ -356,7 +356,7 @@ async function pollSubCompositionTimelines(
 ): Promise<void> {
   const expression = `(function() {
     var hosts = document.querySelectorAll("[data-composition-id]");
-    if (hosts.length <= 1) return true;
+    if (hosts.length === 0) return true;
     var timelines = window.__timelines || {};
     for (var i = 0; i < hosts.length; i++) {
       var id = hosts[i].getAttribute("data-composition-id");
@@ -366,6 +366,13 @@ async function pollSubCompositionTimelines(
     return true;
   })()`;
   const ready = await pollPageExpression(page, expression, timeoutMs, intervalMs);
+  if (ready) {
+    await page.evaluate(`(function() {
+      if (typeof window.__hfForceTimelineRebind === "function") {
+        window.__hfForceTimelineRebind();
+      }
+    })()`);
+  }
   if (!ready) {
     const missing = await page.evaluate(`(function() {
       var hosts = document.querySelectorAll("[data-composition-id]");
