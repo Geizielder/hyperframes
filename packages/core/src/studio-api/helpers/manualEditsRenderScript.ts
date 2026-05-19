@@ -251,6 +251,7 @@ function studioPositionSeekReapplyRuntime(): void {
       const rot = el.style.getPropertyValue(ROTATION_PROP);
       if (rot) {
         el.style.setProperty("rotate", composeRotation(el, "var(" + ROTATION_PROP + ", 0deg)"));
+        stripGsapTranslateFromTransform(el);
       }
     }
     reapplyMotionTimeline();
