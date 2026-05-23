@@ -1,0 +1,35 @@
+{
+  "$schema": "https://hyperframes.heygen.com/schema/registry-item.json",
+  "name": "ios26-liquid-glass",
+  "type": "hyperframes:block",
+  "title": "iOS 26 Liquid Glass Home Screen",
+  "description": "3D iPhone with pixel-perfect iOS 26 home screen featuring liquid glass app icons, status bar, dock, and search pill — rendered via WebGPU glass shaders on a layoutsubtree canvas mapped to a GLTF device model.",
+  "stability": "experimental",
+  "dimensions": {
+    "width": 1920,
+    "height": 1080
+  },
+  "duration": 15,
+  "tags": ["liquid-glass-html-in-canvas", "webgpu", "3d", "iphone", "ios26", "gltf", "html-in-canvas"],
+  "files": [
+    {
+      "path": "ios26-liquid-glass.html",
+      "target": "compositions/ios26-liquid-glass.html",
+      "type": "hyperframes:composition"
+    },
+    {
+      "path": "models/iphone.glb",
+      "target": "models/iphone.glb",
+      "type": "hyperframes:asset"
+    },
+    {
+      "path": "lib/liquid-glass.iife.js",
+      "target": "lib/liquid-glass.iife.js",
+      "type": "hyperframes:asset"
+    }
+  ],
+  "preview": {
+    "video": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ios26-liquid-glass.mp4",
+    "poster": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ios26-liquid-glass.png"
+  }
+}
