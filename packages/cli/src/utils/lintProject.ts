@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve, extname } from "node:path";
+import { dirname, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { lintHyperframeHtml, type HyperframeLintResult } from "@hyperframes/core/lint";
 import type { HyperframeLintFinding } from "@hyperframes/core/lint";
-import { rewriteAssetPath } from "@hyperframes/core";
+import { decodeUrlPathVariants, rewriteAssetPath } from "@hyperframes/core";
 import type { ProjectDir } from "./project.js";
 
 /**
@@ -113,31 +113,53 @@ function cleanAssetUrl(url: string): string {
   return url.trim().split(/[?#]/, 1)[0] ?? "";
 }
 
-function resolveLocalAssetCandidates(projectDir: string, url: string): string[] {
-  const cleanUrl = cleanAssetUrl(url);
-  const variants = [cleanUrl];
-  try {
-    const decodedUrl = decodeURIComponent(cleanUrl);
-    if (decodedUrl !== cleanUrl) variants.unshift(decodedUrl);
-  } catch {
-    // Malformed percent sequences can be literal filenames.
-  }
-
-  return [...new Set(variants)].map((variant) =>
-    variant.startsWith("/") ? resolve(projectDir, variant.slice(1)) : resolve(projectDir, variant),
-  );
+function isWithinProjectRoot(projectDir: string, candidate: string): boolean {
+  const projectRoot = resolve(projectDir);
+  const relativePath = relative(projectRoot, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
-function resolveCssAssetPath(
+function addCandidate(candidates: string[], candidate: string): void {
+  if (!candidates.includes(candidate)) candidates.push(candidate);
+}
+
+function resolveLocalAssetCandidates(projectDir: string, url: string): string[] {
+  const cleanUrl = cleanAssetUrl(url);
+  const projectRoot = resolve(projectDir);
+  const candidates: string[] = [];
+
+  for (const variant of decodeUrlPathVariants(cleanUrl)) {
+    const projectRelative = variant.startsWith("/") ? variant.slice(1) : variant;
+    const resolved = resolve(projectRoot, projectRelative);
+    if (isWithinProjectRoot(projectRoot, resolved)) {
+      addCandidate(candidates, resolved);
+      continue;
+    }
+
+    const normalized = posix.normalize(projectRelative.replace(/\\/g, "/"));
+    const clamped = normalized.replace(/^(\.\.\/)+/, "");
+    if (clamped && !clamped.startsWith("..")) {
+      addCandidate(candidates, resolve(projectRoot, clamped));
+    }
+  }
+
+  return candidates;
+}
+
+function resolveCssAssetCandidates(
   projectDir: string,
   url: string,
   htmlCompSrcPath?: string,
   cssRootRelativePath?: string,
-): string {
-  if (url.startsWith("/")) return resolve(projectDir, url.slice(1));
-  if (cssRootRelativePath) return resolve(projectDir, join(dirname(cssRootRelativePath), url));
-  if (htmlCompSrcPath) return resolve(projectDir, rewriteAssetPath(htmlCompSrcPath, url));
-  return resolve(projectDir, url);
+): string[] {
+  if (url.startsWith("/")) return resolveLocalAssetCandidates(projectDir, url);
+  if (cssRootRelativePath) {
+    return resolveLocalAssetCandidates(projectDir, join(dirname(cssRootRelativePath), url));
+  }
+  if (htmlCompSrcPath) {
+    return resolveLocalAssetCandidates(projectDir, rewriteAssetPath(htmlCompSrcPath, url));
+  }
+  return resolveLocalAssetCandidates(projectDir, url);
 }
 
 /**
@@ -318,14 +340,14 @@ function lintTextureMaskAssetNotFound(
         if (!url || isRemoteOrInlineUrl(url)) continue;
         if (/^__[A-Z_]+__$/.test(url)) continue;
 
-        const resolved = resolveCssAssetPath(
+        const candidates = resolveCssAssetCandidates(
           projectDir,
           url,
           compSrcPath,
           cssSource.rootRelativePath,
         );
-        if (existsSync(resolved)) continue;
-        missing.set(url, resolved);
+        if (candidates.some(existsSync)) continue;
+        missing.set(url, candidates[0] ?? resolve(projectDir, url));
       }
     }
   }

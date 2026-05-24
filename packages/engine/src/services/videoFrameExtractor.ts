@@ -9,6 +9,7 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "fs";
 import { isAbsolute, join, posix, resolve, sep } from "path";
 import { parseHTML } from "linkedom";
+import { decodeUrlPathVariants } from "@hyperframes/core";
 import { trackChildProcess } from "../utils/processTracker.js";
 import { extractMediaMetadata, type VideoMetadata } from "../utils/ffprobe.js";
 import {
@@ -518,19 +519,11 @@ export function resolveProjectRelativeSrc(
   const cleanSrc = qIdx >= 0 ? src.slice(0, qIdx) : src;
   const candidates: string[] = [];
 
-  const srcVariants = [cleanSrc];
-  try {
-    const decodedSrc = decodeURIComponent(cleanSrc);
-    if (decodedSrc !== cleanSrc) srcVariants.unshift(decodedSrc);
-  } catch {
-    // Keep malformed percent sequences as literal filenames.
-  }
-
   const addCandidate = (candidate: string): void => {
     if (!candidates.includes(candidate)) candidates.push(candidate);
   };
 
-  for (const variant of srcVariants) {
+  for (const variant of decodeUrlPathVariants(cleanSrc)) {
     const fromCompiled = compiledDir ? join(compiledDir, variant) : null;
     const fromBase = join(baseDir, variant);
 

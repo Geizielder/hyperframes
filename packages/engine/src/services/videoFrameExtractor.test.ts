@@ -156,6 +156,16 @@ describe("resolveProjectRelativeSrc — sub-composition path clamping", () => {
       );
     }
   });
+
+  it("falls back to literal filenames when percent sequences are malformed", () => {
+    const projectDir = join(tmp, "project");
+    const filename = "100%-discount.mp4";
+    writeFileSync(join(projectDir, "assets", filename), "");
+
+    expect(resolveProjectRelativeSrc(`assets/${filename}`, projectDir)).toBe(
+      join(projectDir, "assets", filename),
+    );
+  });
 });
 
 describe("parseVideoElements", () => {
