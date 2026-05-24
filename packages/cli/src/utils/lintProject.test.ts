@@ -119,6 +119,29 @@ describe("lintProject", () => {
     expect(finding?.selector).toBe('[data-composition-id="scene"] .title');
   });
 
+  it("lints percent-encoded linked CSS filenames that exist decoded on disk", () => {
+    const encodedFilename = "%E6%97%A5%E6%9C%AC%E8%AA%9E.css";
+    const project = makeProject(validHtml(), {
+      "scene.html": `<html><head><link rel="stylesheet" href="${encodedFilename}"></head><body>
+  <div id="scene" data-composition-id="scene" data-width="1920" data-height="1080" data-start="0" data-duration="2"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["scene"] = gsap.timeline({ paused: true });</script>
+</body></html>`,
+    });
+    writeFileSync(
+      join(project.dir, "compositions", decodeURIComponent(encodedFilename)),
+      '[data-composition-id="scene"] .title { opacity: 0; }',
+    );
+
+    const { results } = lintProject(project);
+    const subResult = results.find((result) => result.file === "compositions/scene.html");
+    const finding = subResult?.result.findings.find(
+      (item) => item.code === "composition_self_attribute_selector",
+    );
+
+    expect(finding).toBeDefined();
+    expect(finding?.selector).toBe('[data-composition-id="scene"] .title');
+  });
+
   it("aggregates errors across index.html and sub-compositions", () => {
     const project = makeProject(htmlWithMissingMediaId(), {
       "overlay.html": htmlWithMissingMediaId(),
@@ -526,6 +549,30 @@ describe("texture_mask_asset_not_found", () => {
     );
 
     expect(finding).toBeUndefined();
+  });
+
+  it("checks mask-image URLs inside percent-encoded linked CSS filenames", () => {
+    const encodedFilename = "%E6%97%A5%E6%9C%AC%E8%AA%9E.css";
+    const project = makeProject(validHtml(), {
+      "scene.html": `<html><head><link rel="stylesheet" href="${encodedFilename}"></head><body>
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <div class="hf-texture-text hf-texture-lava">TEXT</div>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["scene"] = gsap.timeline({ paused: true });</script>
+</body></html>`,
+    });
+    writeFileSync(
+      join(project.dir, "compositions", decodeURIComponent(encodedFilename)),
+      '.hf-texture-lava { mask-image: url("masks/missing.png"); }',
+    );
+
+    const { results } = lintProject(project);
+    const finding = results[0]?.result.findings.find(
+      (item) => item.code === "texture_mask_asset_not_found",
+    );
+
+    expect(finding).toBeDefined();
+    expect(finding?.message).toContain("masks/missing.png");
   });
 
   it("resolves root-absolute mask-image URLs from the project root", () => {

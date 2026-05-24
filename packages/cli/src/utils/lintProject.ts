@@ -62,9 +62,9 @@ function collectExternalStyles(
     const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
     if (!isLocalStylesheetHref(href)) continue;
     const rootRelative = compSrcPath ? join(dirname(compSrcPath), href) : href;
-    const resolved = resolve(projectDir, rootRelative);
-    if (!existsSync(resolved)) continue;
-    styles.push({ href, content: readFileSync(resolved, "utf-8") });
+    const stylesheet = resolveExistingLocalAsset(projectDir, rootRelative);
+    if (!stylesheet) continue;
+    styles.push({ href, content: readFileSync(stylesheet.resolved, "utf-8") });
   }
   return styles;
 }
@@ -88,9 +88,12 @@ function collectCssSources(projectDir: string, html: string, compSrcPath?: strin
     if (!isLocalStylesheetHref(href)) continue;
 
     const rootRelativePath = compSrcPath ? join(dirname(compSrcPath), href) : href;
-    const resolved = resolve(projectDir, rootRelativePath);
-    if (!existsSync(resolved)) continue;
-    sources.push({ content: readFileSync(resolved, "utf-8"), rootRelativePath });
+    const stylesheet = resolveExistingLocalAsset(projectDir, rootRelativePath);
+    if (!stylesheet) continue;
+    sources.push({
+      content: readFileSync(stylesheet.resolved, "utf-8"),
+      rootRelativePath: stylesheet.rootRelativePath,
+    });
   }
 
   let tagMatch: RegExpExecArray | null;
@@ -144,6 +147,16 @@ function resolveLocalAssetCandidates(projectDir: string, url: string): string[] 
   }
 
   return candidates;
+}
+
+function resolveExistingLocalAsset(
+  projectDir: string,
+  url: string,
+): { resolved: string; rootRelativePath: string } | null {
+  const projectRoot = resolve(projectDir);
+  const resolved = resolveLocalAssetCandidates(projectRoot, url).find(existsSync);
+  if (!resolved) return null;
+  return { resolved, rootRelativePath: relative(projectRoot, resolved) };
 }
 
 function resolveCssAssetCandidates(
