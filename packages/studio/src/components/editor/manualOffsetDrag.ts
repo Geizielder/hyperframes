@@ -5,6 +5,7 @@ import {
   beginStudioManualEditGesture,
   captureStudioPathOffset,
   endStudioManualEditGesture,
+  readGsapTranslateFromTransform,
   readStudioPathOffset,
   restoreStudioPathOffset,
   type StudioPathOffsetSnapshot,
@@ -231,7 +232,12 @@ export function createManualOffsetDragMember(input: {
   element: HTMLElement;
   rect: ManualOffsetDragRect;
 }): ManualOffsetDragMemberResult {
-  const initialOffset = readStudioPathOffset(input.element);
+  const rawOffset = readStudioPathOffset(input.element);
+  const gsapTranslate = readGsapTranslateFromTransform(input.element);
+  const initialOffset = {
+    x: rawOffset.x + gsapTranslate.x,
+    y: rawOffset.y + gsapTranslate.y,
+  };
   const initialPathOffset = captureStudioPathOffset(input.element);
   const gestureToken = beginStudioManualEditGesture(input.element);
   const measured = measureManualOffsetDragScreenToOffsetMatrix(input.element, initialOffset);
